@@ -17,4 +17,13 @@ test-mmap:
 	deno task build
 	deno test --allow-read=node_modules,. --allow-write=. --allow-net --allow-ffi mprotect_vs_mmap_test.ts
 
-.PHONY: all clean test-mmap
+test-mmap-ffi:
+	deno run --allow-read=node_modules,. --allow-write=. --allow-net --allow-ffi --allow-run mmap_heap_ffi_test.mjs
+
+demo-time-travel:
+	deno run --allow-read=node_modules,. --allow-write=. --allow-net --allow-ffi --allow-run mmap_heap_ffi_test.mjs
+
+test-repl:
+	cd python && uv run pytest test_repl.py -v
+
+.PHONY: all clean test-mmap test-mmap-ffi demo-time-travel test-repl
