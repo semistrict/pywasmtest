@@ -37,6 +37,10 @@ function platform() {
         mapFixed: 0x10,
         mapAnon: 0x1000,
         oRdwr: 0x2,
+        oRdonly: 0x0,
+        oWronly: 0x1,
+        oCreat: 0x200,
+        oTrunc: 0x400,
         msSync: 0x10,
       };
     case "linux":
@@ -49,6 +53,11 @@ function platform() {
         mapFixed: 0x10,
         mapAnon: 0x20,
         oRdwr: 0x2,
+        oRdonly: 0x0,
+        oWronly: 0x1,
+        oCreat: 0x40,
+        oTrunc: 0x200,
+        ficlone: 0x40049409, // ioctl request for reflink clone
         msSync: 0x4,
       };
     default:
@@ -64,6 +73,7 @@ function libcSymbols() {
     },
     msync: { parameters: ["pointer", "usize", "i32"], result: "i32" },
     open: { parameters: ["buffer", "i32"], result: "i32" },
+    open_mode: { name: "open", parameters: ["buffer", "i32", "i32"], result: "i32" },
     close: { parameters: ["i32"], result: "i32" },
   };
   if (Deno.build.os === "darwin") {
@@ -72,8 +82,14 @@ function libcSymbols() {
       clonefile: { parameters: ["buffer", "buffer", "i32"], result: "i32" },
     };
   }
-  return base;
+  return {
+    ...base,
+    ioctl: { parameters: ["i32", "u64", "i32"], result: "i32" },
+  };
 }
+
+const PLATFORM = platform();
+const LIBC = Deno.dlopen(PLATFORM.libc, libcSymbols());
 
 /** Minimal snapshot layout (e.g. benchmarks); Pyodide `run`/`fork` uses `snapshotBytesFromPy` instead. */
 export function buildSnapshotFile(heap, buildId) {
@@ -145,18 +161,21 @@ async function reflinkClone(libc, src, dst) {
     return;
   }
 
-  const tryReflink = new Deno.Command("cp", {
-    args: ["--reflink=auto", "--", src, dst],
-  });
-  const o1 = await tryReflink.output();
-  if (o1.success) return;
-
-  const plain = new Deno.Command("cp", { args: ["--", src, dst] });
-  const o2 = await plain.output();
-  assert(
-    o2.success,
-    `cp failed (reflink and plain): ${new TextDecoder().decode(o2.stderr)}`,
-  );
+  const srcBuf = new TextEncoder().encode(src + "\0");
+  const dstBuf = new TextEncoder().encode(dst + "\0");
+  const srcFd = libc.symbols.open(srcBuf, PLATFORM.oRdonly);
+  assert(srcFd >= 0, `open(src) failed: ${src}`);
+  let dstFd = -1;
+  try {
+    const flags = PLATFORM.oWronly | PLATFORM.oCreat | PLATFORM.oTrunc;
+    dstFd = libc.symbols.open_mode(dstBuf, flags, 0o644);
+    assert(dstFd >= 0, `open(dst) failed: ${dst}`);
+    const rc = libc.symbols.ioctl(dstFd, BigInt(PLATFORM.ficlone), srcFd);
+    assert(rc === 0, `ioctl(FICLONE) failed for ${src} -> ${dst}`);
+  } finally {
+    if (dstFd >= 0) libc.symbols.close(dstFd);
+    libc.symbols.close(srcFd);
+  }
 }
 
 /** Build a session: mmap `ctx.backingPath` over the already-initialized interpreter heap. */
@@ -166,7 +185,6 @@ function createMmapSession(ctx) {
     backingPath,
     branchId,
     P,
-    libc,
     py,
     ems,
     clonesDir,
@@ -188,7 +206,7 @@ function createMmapSession(ctx) {
 
   function mmapCleanup() {
     if (mmapPtr) {
-      libc.symbols.mmap(
+      LIBC.symbols.mmap(
         mmapPtr,
         BigInt(mappedLen),
         P.protRead | P.protWrite,
@@ -197,7 +215,7 @@ function createMmapSession(ctx) {
         BigInt(0),
       );
     }
-    if (mmapFd >= 0) libc.symbols.close(mmapFd);
+    if (mmapFd >= 0) LIBC.symbols.close(mmapFd);
     mmapPtr = null;
     mmapFd = -1;
     mappedLen = 0;
@@ -208,10 +226,10 @@ function createMmapSession(ctx) {
     const heap = ems.HEAPU8;
     const addr = heapPtr();
     const pathBuf = new TextEncoder().encode(backingPath + "\0");
-    const fd = libc.symbols.open(pathBuf, P.oRdwr);
+    const fd = LIBC.symbols.open(pathBuf, P.oRdwr);
     assert(fd >= 0, `open(${backingPath}) failed, fd=${fd}`);
 
-    const mapped = libc.symbols.mmap(
+    const mapped = LIBC.symbols.mmap(
       addr,
       BigInt(heap.byteLength),
       P.protRead | P.protWrite,
@@ -237,22 +255,21 @@ function createMmapSession(ctx) {
       await writeFile(backingPath, snapshotBytesFromPy(py));
       mmapInitFromFile();
     } else {
-      const rc = libc.symbols.msync(heapPtr(), BigInt(mappedLen), P.msSync);
+      const rc = LIBC.symbols.msync(heapPtr(), BigInt(mappedLen), P.msSync);
       assert(rc === 0, `msync failed: ${rc}`);
     }
   }
 
   function syncMappedPagesNow() {
-    const rc = libc.symbols.msync(heapPtr(), BigInt(mappedLen), P.msSync);
+    const rc = LIBC.symbols.msync(heapPtr(), BigInt(mappedLen), P.msSync);
     assert(rc === 0, `msync failed: ${rc}`);
   }
 
   mmapInitFromFile();
 
-  function disposeMmapAndLibc() {
+  function disposeSessionMapping() {
     if (disposed) return;
     mmapCleanup();
-    libc.close();
     disposed = true;
   }
 
@@ -282,7 +299,7 @@ function createMmapSession(ctx) {
       forkSeq += 1;
       const forkName = `fork-${String(forkSeq).padStart(4, "0")}.bin`;
       const snapshotPath = join(clonesDir, forkName);
-      await reflinkClone(libc, backingPath, snapshotPath);
+      await reflinkClone(LIBC, backingPath, snapshotPath);
 
       const live = ems.HEAPU8;
       const fromClone = await readHeapFromSnapshotPath(snapshotPath);
@@ -324,7 +341,7 @@ function createMmapSession(ctx) {
         clonesDir,
         `${String(step).padStart(4, "0")}.bin`,
       );
-      await reflinkClone(libc, backingPath, snapshotPath);
+      await reflinkClone(LIBC, backingPath, snapshotPath);
 
       const live = ems.HEAPU8;
       const fromClone = await readHeapFromSnapshotPath(snapshotPath);
@@ -338,7 +355,7 @@ function createMmapSession(ctx) {
       const childClonesDir = join(workDir, "clones", childBranchId);
       await mkdir(childClonesDir, { recursive: true });
 
-      disposeMmapAndLibc();
+      disposeSessionMapping();
 
       return forkSessionFromSnapshot({
         workDir,
@@ -352,7 +369,6 @@ function createMmapSession(ctx) {
     async close(opts) {
       if (!disposed) {
         mmapCleanup();
-        libc.close();
         disposed = true;
       }
       if (opts?.removeWorkDir) {
@@ -379,8 +395,7 @@ async function forkSessionFromSnapshot({
   clonesDir,
   pyStdout,
 }) {
-  const P = platform();
-  const libc = Deno.dlopen(P.libc, libcSymbols());
+  const P = PLATFORM;
 
   const snapshotRaw = await readFile(snapshotPath);
   const snapshotBytes = snapshotRaw instanceof Uint8Array
@@ -400,7 +415,6 @@ async function forkSessionFromSnapshot({
     backingPath: snapshotPath,
     branchId,
     P,
-    libc,
     py,
     ems,
     clonesDir,
@@ -413,8 +427,7 @@ async function forkSessionFromSnapshot({
  * New interpreter + mmap on `workDir/backing.bin`. Use `s = await s.run(code)` to fork.
  */
 export async function openMmapPySession(options) {
-  const P = platform();
-  const libc = Deno.dlopen(P.libc, libcSymbols());
+  const P = PLATFORM;
 
   const workDir = options?.workDir ?? join(Deno.cwd(), ".mmap-py-work");
   const removeWorkDirOnDispose = options?.removeWorkDirOnDispose ?? false;
@@ -439,7 +452,6 @@ export async function openMmapPySession(options) {
     backingPath,
     branchId,
     P,
-    libc,
     py,
     ems,
     clonesDir,
