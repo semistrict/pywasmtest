@@ -1,0 +1,17 @@
+[project]
+name = "pyrepl"
+version = "0.1.0"
+description = "Persistent Python REPL with mmap-backed state"
+requires-python = ">=3.14"
+dependencies = [
+    "maturin>=1.13.1",
+    "wasmtime>=43.0.0",
+]
+
+[project.scripts]
+pyrepl = "repl:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

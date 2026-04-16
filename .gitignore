@@ -1,0 +1,8 @@
+*.bin
+*.dylib
+__pycache__
+node_modules
+wasi-packages/
+target/
+*.wasm
+*.zip

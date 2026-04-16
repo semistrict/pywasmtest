@@ -1,0 +1,10 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "pyodide": "npm:pyodide"
+  },
+  "tasks": {
+    "repl": "deno run --allow-read=node_modules,. --allow-write=node_modules,. --allow-net --allow-ffi main.ts",
+    "build": "cc -shared -O2 -o libmmapheap.dylib mmap_heap.c && cc -shared -O2 -o libdirtypages.dylib dirty_pages.c"
+  }
+}

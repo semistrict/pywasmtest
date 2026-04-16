@@ -1,0 +1,1 @@
+["x = 42", "def greet(name): return f\"Hello, {name}!\"\nimport json", "x", "greet(\"WASM\")", "json.dumps({\"a\": 1})"]

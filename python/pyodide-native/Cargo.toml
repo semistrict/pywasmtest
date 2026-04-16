@@ -1,0 +1,13 @@
+[package]
+name = "pyodide_native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+wasmer = { version = "4", default-features = false, features = ["sys", "compiler"] }
+wasmer-compiler-llvm = "4"
+wasmer-emscripten = "4"
