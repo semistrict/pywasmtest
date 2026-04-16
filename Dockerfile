@@ -1,12 +1,38 @@
 FROM denoland/deno:2.7.12
 
-RUN apt-get update && apt-get install -y gcc make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    make \
+    xfsprogs \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY print_constants.c Makefile ./
-RUN make
+WORKDIR /src
+COPY . .
+RUN deno cache mmap_heap_ffi_test.mjs
 
-COPY deno.json polyfill.ts main.ts ./
-RUN deno install
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  '' \
+  'IMG=/tmp/pywasmtest-xfs.img' \
+  'MNT=/mnt/xfs' \
+  'WORK=$MNT/work' \
+  '' \
+  'truncate -s 2G "$IMG"' \
+  'mkfs.xfs -f "$IMG" >/dev/null' \
+  'mkdir -p "$MNT" "$WORK"' \
+  'mount -o loop "$IMG" "$MNT"' \
+  'cleanup() {' \
+  '  umount "$MNT" || true' \
+  '  rm -f "$IMG"' \
+  '}' \
+  'trap cleanup EXIT' \
+  '' \
+  'cp -a /src/. "$WORK/"' \
+  'cd "$WORK"' \
+  'make test-mmap-ffi' \
+  > /usr/local/bin/run-xfs-demo.sh \
+  && chmod +x /usr/local/bin/run-xfs-demo.sh
 
-CMD ["sh", "-c", "printf 'x = 42\\nx * 2\\nexit()\\n' | deno task repl && printf 'x\\nexit()\\n' | deno task repl"]
+CMD ["/usr/local/bin/run-xfs-demo.sh"]
